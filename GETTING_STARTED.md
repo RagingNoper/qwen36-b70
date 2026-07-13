@@ -83,6 +83,11 @@ Intel doc and that you rebooted.
 
 > **Note:** the GPU driver is the one step that varies by machine and by how new your OS is. If you get
 > stuck, the Intel link above and their forums are the right place — everything after this is easy.
+>
+> **Why exact versions here don't need to match ours:** the container ships with its *own* Intel GPU
+> userspace runtime (the part that runs the model), so on the host you really only need a **kernel driver
+> that supports Battlemage** plus the `/dev/dri` render nodes. The package versions above are just a
+> known-good set; a newer driver is fine. (Details in `VERSIONS.md`.)
 
 ---
 

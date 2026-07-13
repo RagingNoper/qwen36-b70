@@ -1,5 +1,13 @@
 # Self-contained reproduction image for Qwen3.6-35B-A3B on 4x Intel Arc Pro B70 (vLLM-XPU).
 # Bakes in every runtime patch + the eval harness so a reproducer needs only: this image + the model.
+#
+# NOTE: this is a THIN layer on a prebuilt vLLM-XPU base image; the heavy stack below comes from the
+# base, not from this Dockerfile (so it is not a from-scratch recipe). Exact versions in the image
+# (see VERSIONS.md):
+#   Ubuntu 24.04.3  |  Python 3.12.3  |  torch 2.12.0+xpu  |  vLLM 0.1.dev1+gdec860fb1  |  triton-xpu 3.7.1
+#   oneAPI DPC++ 2025.3.2  |  oneCCL 2021.17.2  |  Intel compute runtime 26.09.37435.12  |  Level-Zero 1.28.0
+# The container carries its OWN Intel GPU userspace runtime; the HOST only needs a Battlemage kernel
+# driver + /dev/dri (host userspace version need not match — see VERSIONS.md).
 FROM t212-vllm-graph-head2-mtp
 
 # --- custom all-reduce (DMA copy-engine) + TP communicator ---

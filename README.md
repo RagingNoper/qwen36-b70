@@ -17,6 +17,8 @@ no runtime mounts except the model.
 - Python 3 (stdlib only) on the host to run `reproduce.py`.
 - The **Qwen3.6-35B-A3B** model directory on disk (HF-format).
 
+Exact software/driver versions baked into the image are in **[VERSIONS.md](VERSIONS.md)**.
+
 ## 1. Get the image
 
 ```bash
