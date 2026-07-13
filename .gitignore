@@ -1,0 +1,7 @@
+# large / generated — not for git (image is on GHCR; datasets are baked into the image)
+qwen36-b70-ship.tar
+qwen36-b70-ship.tar.gz
+datasets/
+hfcache/
+__pycache__/
+*.pyc
