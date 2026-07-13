@@ -92,6 +92,6 @@ python3 serve.py --config int8-tp2 --model /path/to/Qwen3.6-35B-A3B
 
 Want to verify the numbers above? `python3 reproduce.py --config int8-tp2 --model ...` runs the whole perf + MMLU/IFEval/HumanEval/GSM8K suite inside the container (offline) and prints the table (`--suite quick` for a ~15-min sanity run). A layman-friendly step-by-step (drivers → docker → serve → connect a UI) is included.
 
-Full bundle (image tarball + `serve.py` + `reproduce.py` + guides): **[link]**
+Everything (`serve.py`, `reproduce.py`, and a layman-friendly setup guide): **https://github.com/RagingNoper/qwen36-b70** — the image is just `docker pull ghcr.io/ragingnoper/qwen36-b70-ship`.
 
 Happy to answer questions on the kernels, the cudagraph stuff, or Battlemage serving in general.
