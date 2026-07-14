@@ -48,7 +48,7 @@ def main():
             "--shm-size", c["shm"], "-p", f"{PORT}:{PORT}"]
            + sum([["-e", e] for e in env], [])
            + ["-v", f"{a.model}:/model", "--entrypoint", "", IMAGE,
-              "vllm", "serve", "/model", "--max-model-len", "8192", "--max-num-batched-tokens", "4096",
+              "vllm", "serve", "/model", "--max-model-len", "40960", "--max-num-batched-tokens", "4096",
               "--speculative-config", '{"method":"mtp","num_speculative_tokens":2}',
               "--compilation-config", CFG, "--port", str(PORT), "--served-model-name", "qwen3.6-35b-a3b"]
            + c["serve"])

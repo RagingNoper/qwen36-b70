@@ -43,6 +43,17 @@ Both use MTP (k=2) speculative decode + `FULL_DECODE_ONLY` cudagraphs.
 
 **int8-tp2 matches or beats the 4-card bf16 config on basically everything — on half the GPUs.** bf16-tp4 only pulls ahead at mid concurrency (c8–c16).
 
+Single-stream decode is ~128 t/s (bf16) / ~145 t/s (int8), TPOT ~7–8 ms — and it *stays* fast because MTP (speculative decode) is carrying most of it; MTP acceptance on real content runs 78–86%. Combined output throughput as you pile on concurrent requests:
+
+| combined tok/s | c1 | c8 | c16 | c32 |
+|---|---|---|---|---|
+| bf16-tp4 (ShareGPT) | 128 | 207 | 358 | 487 |
+| int8-tp2 (ShareGPT) | 132 | 195 | 330 | 518 |
+| bf16-tp4 (static 1024/256) | 107 | 165 | 273 | 344 |
+| int8-tp2 (static 1024/256) | 114 | 154 | 256 | 387 |
+
+Both scale cleanly to c32. int8-tp2 wins the ends (c1 latency and c32 peak) and has a far better tail — **7.5 s vs 11.5 s p99 TTFT at c32** — while bf16-tp4 takes the mid-range. And remember int8-tp2 is doing all this on **2 cards**, so the other two are free for a second replica (≈2× aggregate).
+
 ### Prefill throughput (tok/s), for the prompt-processing crowd
 
 Prefill rate rises with prompt length (fixed per-request overhead amortizes), then flattens:
@@ -55,18 +66,24 @@ Prefill rate rises with prompt length (fixed per-request overhead amortizes), th
 
 **Peak (batched, output=1): bf16-tp4 ~2,970 t/s, int8-tp2 ~4,670 t/s.** Notable finding: it **saturates by ~concurrency 16** (c32 is identical), and batched ≈ single-stream — a single big prompt already maxes the GPUs, so there's no hidden batched headroom for prefill on a model this size. int8-tp2 works out to **~2,335 t/s per card**; for reference the popular single-B70 llama.cpp+Vulkan writeups land ~1,824 t/s per card (on Q4 — we're on int8, i.e. reading *more* bytes/token), so per-card we're comfortably ahead.
 
-## Capability — does int8 actually cost you anything?
+## Capability
 
-GSM8K alone is a weak test (quant-robust math), so I ran the axes where quantization actually bites: knowledge, instruction-following, and code.
+All measured in **thinking mode** (this is a reasoning model — non-thinking scores undersell it, and it's the mode you actually deploy), `<think>` stripped before scoring. **int8 and bf16 land within ~1pp on every benchmark — quantization is free** — so the numbers below are **averaged across the two configs**:
 
-| | bf16-tp4 | int8-tp2 |
-|---|---|---|
-| MMLU (5-shot, 1140 Q) | 83.0% | 82.9% |
-| IFEval prompt-strict | 83.4% | 83.6% |
-| HumanEval pass@1 | 93.9% | 94.5% |
-| GSM8K | 98% | 97% |
+| benchmark | score |
+|---|---|
+| MMLU-Redux 2.0 | 93.4% |
+| IFEval | 93.7% |
+| HumanEval pass@1 | 97.3% |
+| GSM8K | 97% |
 
-**Statistically identical across the board** (every delta < 1pp, int8 even edges ahead on code). int8 W8A8 here is free quality-wise. Same brains, half the cards.
+Low-90s knowledge, ~97 code/math, and instruction-following on par with the same-shape predecessor (Qwen3.5-35B-A3B) and the wider Qwen3.5 family. (The IFEval figure averages its four sub-metrics — prompt- and instruction-level × strict and loose — which span 91–96%.)
+
+**Benchmarking a reasoning model — lessons that cost me real points:**
+- **Use a relabeled knowledge set.** Standard MMLU is saturated and has mislabeled gold answers — it undersold this model by ~5pts (read 88%). MMLU-Redux 2.0 (corrected labels) is the honest number: **93.4%**.
+- **Thinking ON, strip `<think>` before scoring.** A bad strip regex tanked IFEval to 10% until I noticed Qwen closes `</think>` with *no opening tag* in the completion.
+- **Give reasoning room.** lm-eval's default 1280-token generation cap truncates the trace and craters the strict per-prompt score (all-or-nothing per prompt). Use ≥32k; the model's context is 262k so a big cap is nearly free.
+- **Sample, don't greedy-decode.** With the model's recommended sampling (temp 0.6 / top_p 0.95) instead of greedy, IFEval recovered ~2 points. Greedy sends ~2% of hard *lexical*-constraint prompts (letter-frequency, no-comma, all-caps) into infinite self-verification loops — each a guaranteed fail. (A mild `presence_penalty` / `no_repeat_ngram` fixes it in production.)
 
 ## The interesting engineering bit
 
@@ -90,7 +107,7 @@ python3 serve.py --config int8-tp2 --model /path/to/Qwen3.6-35B-A3B
 
 `serve.py` brings the model up and hands you a standard **OpenAI-compatible endpoint**, so you point whatever you like at it — Open WebUI, LibreChat, the `openai` python lib, curl. The engine and the UI are fully independent; use any client.
 
-Want to verify the numbers above? `python3 reproduce.py --config int8-tp2 --model ...` runs the whole perf + MMLU/IFEval/HumanEval/GSM8K suite inside the container (offline) and prints the table (`--suite quick` for a ~15-min sanity run). A layman-friendly step-by-step (drivers → docker → serve → connect a UI) is included.
+Want to verify the numbers above? `python3 reproduce.py --config int8-tp2 --model ...` runs the whole perf + MMLU-Redux/IFEval/HumanEval/GSM8K suite inside the container (offline, in thinking mode) and prints the table (`--suite quick` for a ~15-min sanity run; the full capability suite is ~3-4 h). A layman-friendly step-by-step (drivers → docker → serve → connect a UI) is included.
 
 Everything (`serve.py`, `reproduce.py`, and a layman-friendly setup guide): **https://github.com/RagingNoper/qwen36-b70** — the image is just `docker pull ghcr.io/ragingnoper/qwen36-b70-ship`.
 

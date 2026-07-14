@@ -46,7 +46,7 @@ def main():
             "--ipc", "host", "--shm-size", c["shm"], "-p", f"{port}:{port}"]
            + sum([["-e", e] for e in env], [])
            + ["-v", f"{a.model}:/model", "--entrypoint", "", IMAGE,
-              "vllm", "serve", "/model", "--max-model-len", "8192", "--max-num-batched-tokens", "4096",
+              "vllm", "serve", "/model", "--max-model-len", "40960", "--max-num-batched-tokens", "4096",
               "--speculative-config", '{"method":"mtp","num_speculative_tokens":2}',
               "--compilation-config", CFG, "--host", "0.0.0.0", "--port", str(port),
               "--served-model-name", "qwen3.6-35b-a3b"]

@@ -69,24 +69,33 @@ def main():
            f"repro-gsm {100 if full else 40} 16 0.0 {MODEL}")
     R.append(("capability", "GSM8K", g(o, "GSM8K = "), "%"))
 
-    # ---- MMLU / IFEval / HumanEval (full only) ----
+    # ---- MMLU-Redux / IFEval / HumanEval (full only) — all in THINKING mode ----
+    # This is a reasoning model; capability is measured with thinking ON and the <think> block stripped
+    # before scoring. See the report for why standard MMLU / greedy / small budgets undersell it.
     if full:
-        print("[5/5] MMLU + IFEval + HumanEval ...", flush=True)
-        o = sh(f"python3 -c \"from lm_eval.__main__ import cli_evaluate; import sys; "
-               f"sys.argv=['x','--model','local-completions','--model_args',"
-               f"'model={MODEL},base_url=http://localhost:{PORT}/v1/completions,tokenizer=/model,"
-               f"num_concurrent=16,max_retries=4,tokenized_requests=False,timeout=400,logprobs=10',"
-               f"'--tasks','mmlu','--num_fewshot','5','--limit','20']; cli_evaluate()\"", timeout=5400)
-        m = re.search(r"\|mmlu\s+\|.*?\|acc\s+\|\s*\|([0-9.]+)", o)
-        R.append(("capability", "MMLU (5-shot)", round(float(m.group(1))*100, 1) if m else float("nan"), "%"))
-        o = sh(f"python3 {D}/scripts/run_lmeval.py --model local-chat-completions --model_args "
-               f"'model={MODEL},base_url=http://localhost:{PORT}/v1/chat/completions,num_concurrent=8,"
-               f"max_retries=4,tokenized_requests=False,timeout=500' --tasks ifeval --apply_chat_template "
-               f"--gen_kwargs max_gen_toks=1280", timeout=5400)
-        R.append(("capability", "IFEval prompt-strict",
-                  round(g(o, r"prompt_level_strict_acc\|.\s*\|")*100, 1), "%"))
-        o = sh(f"python3 {D}/scripts/humaneval_eval.py http://localhost:{PORT}/v1/chat/completions "
-               f"repro 164 8 {MODEL}", timeout=5400)
+        print("[5/5] MMLU-Redux + IFEval + HumanEval (thinking mode) ...", flush=True)
+        TA = (f"model={MODEL},base_url=http://localhost:{PORT}/v1/chat/completions,"
+              f"num_concurrent=16,max_retries=4,tokenized_requests=False,timeout=1800")
+        # MMLU-Redux 2.0 (corrected-label MMLU), generative CoT. Subsampled for runtime; the published
+        # 93.4% is the full 5330-question set, so expect a few points of sampling noise here.
+        o = sh(f"python3 {D}/scripts/run_lmeval_think.py --model local-chat-completions "
+               f"--model_args '{TA}' --tasks mmlu_redux_generative --apply_chat_template "
+               f"--gen_kwargs max_gen_toks=32000 --limit 8", timeout=14400)
+        m = re.search(r"mmlu_redux \(generative\).*?exact_match.*?([0-9.]+)", o)
+        R.append(("capability", "MMLU-Redux", round(float(m.group(1))*100, 1) if m else float("nan"), "%"))
+        # IFEval: thinking + the model's recommended sampling (temp 0.6/top_p 0.95, not greedy) + large
+        # budget so reasoning traces are never truncated (both matter — see report).
+        o = sh(f"python3 {D}/scripts/run_lmeval_think.py --model local-chat-completions "
+               f"--model_args '{TA}' --tasks ifeval --apply_chat_template "
+               f"--gen_kwargs do_sample=true,temperature=0.6,top_p=0.95,max_gen_toks=32000", timeout=14400)
+        # IFEval reported as the average of its four sub-metrics (prompt/instruction x strict/loose).
+        ifm = [g(o, m + r"\s*\|[^|]*\|") for m in
+               ("prompt_level_strict_acc", "prompt_level_loose_acc",
+                "inst_level_strict_acc", "inst_level_loose_acc")]
+        R.append(("capability", "IFEval (avg of 4)", round(sum(ifm) / len(ifm) * 100, 1), "%"))
+        # HumanEval pass@1, thinking mode.
+        o = sh(f"python3 {D}/scripts/humaneval_think.py http://localhost:{PORT}/v1/chat/completions "
+               f"repro 164 12 {MODEL}", timeout=7200)
         R.append(("capability", "HumanEval pass@1", g(o, "pass@1 = "), "%"))
 
     # ---- print ----

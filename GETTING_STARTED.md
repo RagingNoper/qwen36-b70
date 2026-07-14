@@ -167,7 +167,8 @@ What happens: it starts the model server, waits for it to say `READY` (the first
 kernels and can take 5–10 minutes — that's normal), runs the benchmarks, prints a results table, and
 shuts the server down.
 
-When you're happy it works, run the **full** suite (drop `--suite quick`; takes 1–2 hours and produces
+When you're happy it works, run the **full** suite (drop `--suite quick`; takes ~3–4 hours — the
+capability evals run in thinking mode with a large token budget, which is slow but correct — and produces
 all the published numbers including MMLU / HumanEval / GSM8K):
 
 ```bash
@@ -218,7 +219,7 @@ above. Nothing is locked together — you can even run several different apps ag
 Open WebUI is a self-hosted, ChatGPT-style web interface. Start it with one command:
 
 ```bash
-docker run -d -p 3000:3000 --add-host=host.docker.internal:host-gateway \
+docker run -d -p 3000:8080 --add-host=host.docker.internal:host-gateway \
   -e OPENAI_API_BASE_URL=http://host.docker.internal:8107/v1 \
   -e OPENAI_API_KEY=none \
   --name openwebui ghcr.io/open-webui/open-webui:main
@@ -259,10 +260,11 @@ At the end you'll get a table like:
 -- static --
   c1 out_tput             114.4 t/s     <- tokens/sec, one request at a time
   c1 TPOT                  6.9  ms       <- time per output token (lower = faster typing)
--- capability --
+-- capability (thinking mode) --
   GSM8K                    97.0 %        <- accuracy on grade-school math
-  MMLU (5-shot)            82.9 %        <- broad knowledge
-  HumanEval pass@1         94.5 %        <- coding
+  MMLU-Redux 2.0           93.4 %        <- broad knowledge (corrected-label MMLU)
+  IFEval (avg of 4)        93.7 %        <- instruction-following
+  HumanEval pass@1         97.3 %        <- coding
 ```
 
 These should match the published numbers within a few percent of run-to-run variation. If they do,

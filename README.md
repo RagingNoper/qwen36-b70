@@ -41,7 +41,7 @@ Python library, `curl`, etc. (the server and the UI are fully independent; use w
 ## 2b. (Optional) Verify the published numbers
 
 ```bash
-python3 reproduce.py --config int8-tp2 --model /path/to/Qwen3.6-35B-A3B            # full, ~1-2 h
+python3 reproduce.py --config int8-tp2 --model /path/to/Qwen3.6-35B-A3B            # full, ~3-4 h (thinking-mode capability evals are slow)
 python3 reproduce.py --config bf16-tp4 --model /path/to/Qwen3.6-35B-A3B --suite quick   # ~15 min
 ```
 
@@ -50,18 +50,29 @@ baked in), prints a results table, and tears the container down.
 
 ## 3. Expected results (temp 0, seed 42)
 
+**Performance** (per config):
+
 | | bf16-tp4 (4 cards) | int8-tp2 (2 cards) |
 |---|---|---|
 | Prefill TTFT @1024 tok | 382 ms | 350 ms |
 | Raw decode, single stream | ~128 t/s | ~145 t/s |
 | Peak throughput @ c32 (ShareGPT) | 487 t/s | 518 t/s |
-| MMLU (5-shot) | 83.0% | 82.9% |
-| IFEval prompt-strict | 83.4% | 83.6% |
-| HumanEval pass@1 | 93.9% | 94.5% |
-| GSM8K | 98% | 97% |
 
-Numbers reproduce within run-to-run noise. The capability axes are statistically identical between the
-two configs — int8 costs no measurable quality.
+**Capability** (thinking mode, `<think>` stripped before scoring; averaged across both configs — int8 and
+bf16 are within ~1pp on every axis, so int8 costs no measurable quality):
+
+| benchmark | score |
+|---|---|
+| MMLU-Redux 2.0 | 93.4% |
+| IFEval | 93.7% |
+| HumanEval pass@1 | 97.3% |
+| GSM8K | 97% |
+
+(IFEval is the average of its four sub-metrics — prompt/instruction × strict/loose.)
+
+Numbers reproduce within run-to-run noise. Capability is measured in **thinking mode** (the deploy mode)
+with a large generation budget and the model's recommended sampling — see the report for why that matters
+for a reasoning model.
 
 > **int8-tp2 note:** its prefill depends on the PCIe bandwidth between the two GPUs you use. `reproduce.py`
 > defaults to `--devices 2,3` (a high-P2P pair on the reference box). On a 2-GPU box use `--devices 0,1`;
@@ -70,7 +81,7 @@ two configs — int8 costs no measurable quality.
 ## What's inside
 
 `reproduce.py` (host) → boots `qwen36-b70-ship` → `bench_inner.py` (in-container) drives `vllm bench serve`
-+ `lm-eval` (MMLU/IFEval) + `humaneval_eval.py` + `gsm8k_eval2.py`. Server flags are in `reproduce.py`
++ `lm-eval` (MMLU-Redux + IFEval, thinking mode via `run_lmeval_think.py`) + `humaneval_think.py` + `gsm8k_eval2.py`. Server flags are in `reproduce.py`
 (`CONFIGS` + `CFG`); the two configs differ only in TP size, quantization, gpu-util, and the DMA all-reduce.
 
 ---
