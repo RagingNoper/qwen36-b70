@@ -1,6 +1,6 @@
 # Qwen3.6-35B-A3B on 4× Intel Arc Pro B70 (vLLM-XPU): full benchmarks + one-command reproducible builds
 
-Follow-up to my earlier posts on getting this MoE running on Battlemage. It's been about six weeks of yak-shaving; I finally have two configs I'm happy with, benchmarked them properly (throughput, latency, *and* capability), and packaged everything so you can `docker load` an image and serve the model (or re-run every benchmark) with one Python script. Origin story, hurdles, numbers, and repro below.
+Follow-up to my earlier posts on getting this MoE running on Battlemage. It's been about six weeks of yak-shaving; I finally have two configs I'm happy with, benchmarked them properly (throughput, latency, *and* capability), and packaged everything so you can `docker pull` an image and serve the model (or re-run every benchmark) with one Python script. Origin story, hurdles, numbers, and repro below.
 
 **Hardware:** 4× Intel Arc Pro B70 (32 GB each, Battlemage/Xe2), Threadripper Pro on a WRX80 board. Model is Qwen3.6-35B-A3B (35B total, ~3B active MoE). Serving is vLLM-XPU with a pile of custom kernels.
 
@@ -31,19 +31,19 @@ That got me to a stable **~100 tok/s decode** baseline. This month was about the
 
 Both use MTP (k=2) speculative decode + `FULL_DECODE_ONLY` cudagraphs.
 
-## Performance (temp 0, seed 42)
+## Performance (seed 42)
 
 | | bf16-tp4 (4 cards) | int8-tp2 (2 cards) |
 |---|---|---|
 | Prefill TTFT @1024 tok | 382 ms | **350 ms** |
 | Prefill TTFT @4096 tok | 1398 ms | **882 ms** |
-| Single-stream decode | ~128 t/s | **~145 t/s** |
+| Single-stream decode (raw, prefill-excluded) | ~128 t/s | **~145 t/s** |
 | Throughput @ c32 (ShareGPT) | 487 t/s | **518 t/s** |
 | p99 TTFT @ c32 (static) | 11.5 s | **7.5 s** |
 
 **int8-tp2 matches or beats the 4-card bf16 config on basically everything — on half the GPUs.** bf16-tp4 only pulls ahead at mid concurrency (c8–c16).
 
-Single-stream decode is ~128 t/s (bf16) / ~145 t/s (int8), TPOT ~7–8 ms — and it *stays* fast because MTP (speculative decode) is carrying most of it; MTP acceptance on real content runs 78–86%. Combined output throughput as you pile on concurrent requests:
+Single-stream **raw decode** (prefill excluded) is ~128 t/s (bf16) / ~145 t/s (int8) — median-TPOT rates (~7–8 ms/token) with **MTP (k=2) speculative decode on** — ~2.4 accepted tokens per step, acceptance **~69% on synthetic ShareGPT / ~77% on realistic mixed content** (code/RAG/chat, via spec-bench). **Combined** (end-to-end, prefill-included) output throughput as you add concurrent requests:
 
 | combined tok/s | c1 | c8 | c16 | c32 |
 |---|---|---|---|---|
@@ -56,7 +56,7 @@ Both scale cleanly to c32. int8-tp2 wins the ends (c1 latency and c32 peak) and 
 
 ### Prefill throughput (tok/s), for the prompt-processing crowd
 
-Prefill rate rises with prompt length (fixed per-request overhead amortizes), then flattens:
+These are single-stream (one request at a time) prefill rates, measured as prompt-length ÷ TTFT. Rate rises with prompt length as fixed per-request overhead amortizes — bf16 flattens by ~2K tokens, int8 keeps climbing:
 
 | prompt tokens | bf16-tp4 | int8-tp2 |
 |---|---|---|
@@ -64,7 +64,9 @@ Prefill rate rises with prompt length (fixed per-request overhead amortizes), th
 | 2048 | 2,910 t/s | 3,880 t/s |
 | 4096 | 2,930 t/s | 4,650 t/s |
 
-**Peak (batched, output=1): bf16-tp4 ~2,970 t/s, int8-tp2 ~4,670 t/s.** Notable finding: it **saturates by ~concurrency 16** (c32 is identical), and batched ≈ single-stream — a single big prompt already maxes the GPUs, so there's no hidden batched headroom for prefill on a model this size. int8-tp2 works out to **~2,335 t/s per card**; for reference the popular single-B70 llama.cpp+Vulkan writeups land ~1,824 t/s per card (on Q4 — we're on int8, i.e. reading *more* bytes/token), so per-card we're comfortably ahead.
+Strip the fixed per-request overhead (the incremental rate from 1024→4096 tokens) and the *pure* prefill compute rate is **~3,000 t/s (bf16) / ~5,800 t/s (int8)**.
+
+**Peak batched** — a dedicated sweep (input 2048/4096 × concurrency 8/16/32) — hits **~2,970 t/s (bf16) / ~4,670 t/s (int8)**, and the notable finding is that prefill **saturates by ~concurrency 16** (c32 is identical) and batched ≈ single-stream at long prompts: one big prompt already maxes the GPUs, so there's no hidden batched headroom for prefill on a model this size. int8-tp2's ~4,670 works out to **~2,335 t/s per card**; the popular single-B70 llama.cpp+Vulkan writeups land ~1,824 t/s per card (Q4 — we're on int8, reading *more* bytes/token), so per-card we're comfortably ahead.
 
 ## Capability
 
@@ -75,9 +77,9 @@ All measured in **thinking mode** (this is a reasoning model — non-thinking sc
 | MMLU-Redux 2.0 | 93.4% |
 | IFEval | 93.7% |
 | HumanEval pass@1 | 97.3% |
-| GSM8K | 97% |
+| GSM8K | 97.5% |
 
-Low-90s knowledge, ~97 code/math, and instruction-following on par with the same-shape predecessor (Qwen3.5-35B-A3B) and the wider Qwen3.5 family. (The IFEval figure averages its four sub-metrics — prompt- and instruction-level × strict and loose — which span 91–96%.)
+Low-90s knowledge, ~97 code/math, strong instruction-following. These weren't about chasing a leaderboard — they're a check that all the kernel and quantization changes cost **no quality or capability**, and they don't. (The IFEval figure averages its four sub-metrics — prompt- and instruction-level × strict and loose — which span 91–96%.)
 
 **Benchmarking a reasoning model — lessons that cost me real points:**
 - **Use a relabeled knowledge set.** Standard MMLU is saturated and has mislabeled gold answers — it undersold this model by ~5pts (read 88%). MMLU-Redux 2.0 (corrected labels) is the honest number: **93.4%**.
