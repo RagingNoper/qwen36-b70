@@ -5,13 +5,19 @@ prints benchmark numbers. It assumes you can copy-paste into a terminal and read
 that you know anything about Intel GPU drivers, Docker, or vLLM. Take it one part at a time; each part
 ends with a check so you know it worked before moving on.
 
-**Four ready-made setups — pick by your hardware and use case:**
-- `int8-tp4-latency` — **4** cards. Fastest replies when it's mostly one person at a time.
-- `int8-tp2` — **2** cards. Nearly as fast on half the hardware; recommended if you have 2 cards.
-- `int8-tp4-concurrency` — **4** cards. For serving many people at once.
-- `bf16-tp4` — **4** cards. Full-precision weights (the int8 setups match its quality).
+**Choose your configuration.** You run everything in this guide with **`--config <tag>`** — you pick one of
+the four tags below and use that same tag in every `serve.py` and `reproduce.py` command:
 
-The examples below use `int8-tp2`; any config works the same way — just change the `--config` name.
+| `--config` tag | GPUs | best for |
+|---|---|---|
+| `int8-tp4-latency` | 4 | The fastest replies, when it's mostly one person chatting at a time |
+| `int8-tp2` | 2 | Nearly as fast on just **two** cards (or to keep the other two free) |
+| `int8-tp4-concurrency` | 4 | Serving **many people at once** (biggest KV cache + throughput) |
+| `bf16-tp4` | 4 | Full-precision weights — most people don't need it (int8 matches its quality) |
+
+So a real command looks like `python3 serve.py --config int8-tp4-latency --model /path/to/your/model`.
+**Heads-up:** the examples throughout this guide use `int8-tp2` as a stand-in — wherever you see it, put in
+whichever tag you picked from the table above.
 
 Rough time: 30–60 min of setup (mostly the GPU driver), then ~15 min for a quick test run.
 
@@ -204,6 +210,9 @@ day-to-day, use `serve.py` instead — it starts the model and **leaves it runni
 ```bash
 python3 serve.py --config int8-tp2 --model /home/you/models/Qwen3.6-35B-A3B
 ```
+
+(Same `--config` tags as the table up top — swap `int8-tp2` for `int8-tp4-latency`, `int8-tp4-concurrency`,
+or `bf16-tp4` depending on your hardware and how many people will use it.)
 
 When it's ready it prints a box with the connection details, the important ones being:
 
