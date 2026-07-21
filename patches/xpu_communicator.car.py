@@ -55,11 +55,22 @@ class XpuCommunicator(DeviceCommunicatorBase):
         ws = self.world_size
         if ws < 2 or (ws & (ws - 1)) != 0:
             return
-        import sys
+        import sys  # os is imported at module scope (do NOT re-import locally -> shadows + UnboundLocalError)
         if "/work/ext" not in sys.path:
             sys.path.insert(0, "/work/ext")
         try:
-            import custom_ar
+            # VLLM_XPU_CAR_SO selects which baked all-reduce kernel to load (default = the DMA
+            # copy-engine .so used by the latency configs). The int8-tp4 throughput config points
+            # this at custom_ar.so.v4 (vec-reduce + reduce-scatter/all-gather). A dev mount over
+            # /work/ext/custom_ar.so still works via the default path.
+            _so = os.environ.get("VLLM_XPU_CAR_SO", "")
+            if _so:
+                import importlib.util as _ilu
+                _spec = _ilu.spec_from_file_location("custom_ar", _so)
+                custom_ar = _ilu.module_from_spec(_spec); _spec.loader.exec_module(custom_ar)
+            else:
+                import custom_ar
+            logger.info("XPU custom_ar loaded from %s", _so or "/work/ext/custom_ar.so")
         except Exception as e:
             logger.warning("XPU custom_ar import failed: %s", e)
             return

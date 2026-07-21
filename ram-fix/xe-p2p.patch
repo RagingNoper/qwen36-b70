@@ -1,0 +1,64 @@
+--- a/drivers/gpu/drm/xe/xe_dma_buf.c
++++ b/drivers/gpu/drm/xe/xe_dma_buf.c
+@@ -22,6 +22,15 @@
+ 
+ MODULE_IMPORT_NS("DMA_BUF");
+ 
++/* T4: keep dma-buf-exported BOs in VRAM via PCIe P2P instead of migrating them to system
++ * memory (XE_PL_TT). The default (false) is byte-identical stock behavior. Enable per-boot with
++ * `modprobe xe force_p2p_vram=1`. Only safe where device-to-device PCIe P2P actually works. */
++#include <linux/moduleparam.h>
++bool xe_force_p2p_vram;
++module_param_named(force_p2p_vram, xe_force_p2p_vram, bool, 0644);
++MODULE_PARM_DESC(force_p2p_vram,
++	"Keep dma-buf exported BOs in VRAM (PCIe P2P) instead of migrating to system memory (default: 0)");
++
+ static int xe_dma_buf_attach(struct dma_buf *dmabuf,
+ 			     struct dma_buf_attachment *attach)
+ {
+@@ -31,7 +40,8 @@
+ 	    pci_p2pdma_distance(to_pci_dev(obj->dev->dev), attach->dev, false) < 0)
+ 		attach->peer2peer = false;
+ 
+-	if (!attach->peer2peer && !xe_bo_can_migrate(gem_to_xe_bo(obj), XE_PL_TT))
++	if (!xe_force_p2p_vram &&
++	    !attach->peer2peer && !xe_bo_can_migrate(gem_to_xe_bo(obj), XE_PL_TT))
+ 		return -EOPNOTSUPP;
+ 
+ 	xe_pm_runtime_get(to_xe_device(obj->dev));
+@@ -63,6 +73,9 @@
+ 		}
+ 	}
+ 
++	if (xe_force_p2p_vram)
++		allow_vram = true;	/* T4: keep exported BO in VRAM over PCIe P2P */
++
+ 	if (xe_bo_is_pinned(bo) && !xe_bo_is_mem_type(bo, XE_PL_TT) &&
+ 	    !(xe_bo_is_vram(bo) && allow_vram)) {
+ 		drm_dbg(&xe->drm, "Can't migrate pinned bo for dma-buf pin.\n");
+@@ -108,7 +121,7 @@
+ 		return ERR_PTR(-EOPNOTSUPP);
+ 
+ 	if (!xe_bo_is_pinned(bo)) {
+-		if (!attach->peer2peer)
++		if (!attach->peer2peer && !xe_force_p2p_vram)
+ 			r = xe_bo_migrate(bo, XE_PL_TT, NULL, exec);
+ 		else
+ 			r = xe_bo_validate(bo, NULL, false, exec);
+@@ -257,9 +270,13 @@
+ 	xe_bo_willneed_get_locked(bo);
+ 	xe_bo_unlock(bo);
+ 
+-	ret = ttm_bo_setup_export(&bo->ttm, &ctx);
+-	if (ret)
+-		goto out_put;
++	/* T4: skip system-page population of the exported BO — keeps it VRAM-resident (importers use
++	 * PCIe P2P). Eliminates the ~full-working-set host-RAM shadow from ttm_tt_populate. */
++	if (!xe_force_p2p_vram) {
++		ret = ttm_bo_setup_export(&bo->ttm, &ctx);
++		if (ret)
++			goto out_put;
++	}
+ 
+ 	buf = drm_gem_prime_export(obj, flags);
+ 	if (IS_ERR(buf)) {

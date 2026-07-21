@@ -5,3 +5,5 @@ datasets/
 hfcache/
 __pycache__/
 *.pyc
+validate_serve.*
+val_one.*

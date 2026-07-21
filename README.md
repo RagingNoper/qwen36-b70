@@ -1,101 +1,91 @@
-# Qwen3.6-35B-A3B on 4× Intel Arc Pro B70 — reproducible benchmark bundle
+# Qwen3.6-35B-A3B on 4× Intel Arc Pro B70
 
-Two turn-key vLLM-XPU serving configs for the Qwen3.6-35B-A3B MoE, plus a one-command harness that
-reproduces the published throughput, latency, and capability numbers.
+Run the Qwen3.6-35B-A3B model on Intel Arc Pro B70 GPUs with one Docker image and one command.
+Everything is baked into the image — you only supply the model files. Four ready-made setups; you
+pick one at launch. New here? Follow **[GETTING_STARTED.md](GETTING_STARTED.md)** for a click-by-click
+walkthrough (install Docker → get the model → serve → connect a chat app).
 
-- **`bf16-tp4`** — bf16 across 4 cards, custom DMA copy-engine all-reduce (2.5× single-stream prefill).
-- **`int8-tp2`** — experts_int8 across 2 cards. Matches bf16-tp4 on speed *and* capability, on half the cards.
+## Which one should I pick?
 
-Both run MTP (k=2) speculative decode + `FULL_DECODE_ONLY` cudagraphs. Everything (custom kernels, the
-all-reduce `.so`, MTP/GDN patches, int8 kernels, and the full eval harness) is **baked into the image** —
-no runtime mounts except the model.
+| Your situation | Use this | What you get |
+|---|---|---|
+| I have **4 cards** and mostly **one person** chatting at a time | **`int8-tp4-latency`** | The fastest replies (~206 tokens/sec). |
+| I only have **2 cards** (or want to keep two free) | **`int8-tp2`** | Almost as fast (~174 tok/s), and the quickest to start answering long prompts. |
+| I have **4 cards** and want to serve **lots of people at once** | **`int8-tp4-concurrency`** | ~965 tok/s across 64 simultaneous chats, and room for ~150 conversations at once. |
+| I specifically want **full-precision** weights | **`bf16-tp4`** | Full bf16. (The int8 setups match it on quality and beat it on speed, so most people don't need this.) |
 
-## Requirements
+All four give **identical answer quality** — the int8 versions are quantized in a way that costs no
+measurable quality on this model. Pick based on your hardware and how many people will use it.
 
-- A box with Intel Arc Pro B70 GPUs (4 for `bf16-tp4`, 2 for `int8-tp2`) + the Level-Zero/compute stack.
-- Docker with `--device /dev/dri` GPU access.
-- Python 3 (stdlib only) on the host to run `reproduce.py`.
-- The **Qwen3.6-35B-A3B** model directory on disk (HF-format).
+## What you need
 
-Exact software/driver versions baked into the image are in **[VERSIONS.md](VERSIONS.md)**.
+- A machine with Intel Arc Pro B70 GPUs — **2** for `int8-tp2`, **4** for the other three.
+- **Docker** installed, with GPU access (`--device /dev/dri`).
+- The **Qwen3.6-35B-A3B** model files on disk (download separately — not in the image).
+- Nothing else: the image carries its own GPU runtime; the host just needs a Battlemage GPU driver.
+
+(Exact software versions in the image: **[VERSIONS.md](VERSIONS.md)**.)
 
 ## 1. Get the image
 
 ```bash
-docker pull ghcr.io/ragingnoper/qwen36-b70-ship:latest   # ~11 GB download, ~48 GB on disk
-docker images ghcr.io/ragingnoper/qwen36-b70-ship        # confirm it's there
+docker pull ghcr.io/ragingnoper/qwen36-b70-ship:latest   # ~11 GB download
 ```
 
-## 2. Use it — serve the model
+## 2. Start the model
+
+Pick one line (point `--model` at your Qwen3.6-35B-A3B folder):
 
 ```bash
-python3 serve.py --config int8-tp2 --model /path/to/Qwen3.6-35B-A3B
+python3 serve.py --config int8-tp4-latency     --model /path/to/Qwen3.6-35B-A3B   # fastest replies (4 cards)
+python3 serve.py --config int8-tp2             --model /path/to/Qwen3.6-35B-A3B   # 2 cards
+python3 serve.py --config int8-tp4-concurrency --model /path/to/Qwen3.6-35B-A3B   # many people at once
+python3 serve.py --config bf16-tp4             --model /path/to/Qwen3.6-35B-A3B   # full precision
 ```
 
-Starts the model and **leaves it running**, then prints its connection details. It serves the standard
-**OpenAI-compatible API**, so point any chat UI or app at it — Open WebUI, LibreChat, the `openai`
-Python library, `curl`, etc. (the server and the UI are fully independent; use whatever you like). See
-**GETTING_STARTED.md → "Part 6b — Just use the model"** for the one-line Open WebUI setup. Stop with
-`docker rm -f qwen36-serve`.
+The first start takes ~8–12 min (it compiles GPU kernels), then it prints a URL and **keeps running**.
+Stop it any time with `docker rm -f qwen36-serve`.
 
-## 2b. (Optional) Verify the published numbers
+## 3. Connect a chat app
 
+The server speaks the standard **OpenAI API**, so any OpenAI-compatible chat app works. Point it at the
+URL that `serve.py` printed (e.g. `http://<your-machine-ip>:8107/v1`), model name `qwen3.6-35b-a3b`,
+API key left blank. **[GETTING_STARTED.md](GETTING_STARTED.md)** has a copy-paste Open WebUI setup.
+
+## What to expect (reference box, seed 42)
+
+| | int8-tp4-latency | int8-tp2 | int8-tp4-concurrency | bf16-tp4 |
+|---|---|---|---|---|
+| Single reply speed (decode) | **206 tok/s** | 174 tok/s | 142 tok/s | 175 tok/s |
+| Time to first token (1024-tok prompt) | 206 ms | 173 ms | 195 ms | 205 ms |
+| Prompt-reading speed (1024 tok) | 5,147 tok/s | **6,268 tok/s** | 5,148 tok/s | 5,139 tok/s |
+| Throughput at 64 users | — | — | **965 tok/s** | — |
+| Simultaneous conversations (KV cache) | 816k tok | 267k tok | **1.37M tok** | 380k tok |
+
+**Quality is the same across all four** (thinking mode, recommended sampling): MMLU-Redux 2.0 **93.4%**,
+IFEval **92.7%**, HumanEval **97.0%**, GSM8K **98%** — right where a healthy Qwen3.6-35B-A3B should be.
+int8 costs no measurable quality vs bf16.
+
+**Want to double-check the numbers yourself?**
 ```bash
-python3 reproduce.py --config int8-tp2 --model /path/to/Qwen3.6-35B-A3B            # full, ~3-4 h (thinking-mode capability evals are slow)
-python3 reproduce.py --config bf16-tp4 --model /path/to/Qwen3.6-35B-A3B --suite quick   # ~15 min
+python3 reproduce.py --config int8-tp4-latency --model /path/to/Qwen3.6-35B-A3B --suite quick   # ~15 min
+python3 reproduce.py --config int8-tp4-concurrency --model /path/to/Qwen3.6-35B-A3B             # full, ~3–4 h
 ```
+It runs the benchmarks inside the container (datasets are baked in), prints a table, and cleans up.
 
-`reproduce.py` boots the server, runs the benchmarks **inside** the container (offline — datasets are
-baked in), prints a results table, and tears the container down.
+> **`int8-tp2` — which two cards matter.** On a 4-card box the pairs aren't equal: two cards on the same
+> part of the motherboard talk ~3.7× faster than a cross-board pair, and that affects how fast `int8-tp2`
+> reads prompts. `serve.py` defaults to the fast pair (`--devices 2,3`) on the reference box; on a 2-GPU
+> box use `--devices 0,1`; on other boxes, if prompt-reading is slow, try a different adjacent pair. The
+> 4-card configs use all four and aren't affected.
 
-## 3. Expected results (temp 0, seed 42)
+## Optional: get ~100 GB of host RAM back (multi-GPU only)
 
-**Performance** (per config):
-
-| | bf16-tp4 (4 cards) | int8-tp2 (2 cards) |
-|---|---|---|
-| Prefill TTFT @1024 tok | 382 ms | 350 ms |
-| Raw decode, single stream | ~128 t/s | ~145 t/s |
-| Peak throughput @ c32 (ShareGPT) | 487 t/s | 518 t/s |
-
-**Capability** (thinking mode, `<think>` stripped before scoring; averaged across both configs — int8 and
-bf16 are within ~1pp on every axis, so int8 costs no measurable quality):
-
-| benchmark | score |
-|---|---|
-| MMLU-Redux 2.0 | 93.4% |
-| IFEval | 93.7% |
-| HumanEval pass@1 | 97.3% |
-| GSM8K | 97% |
-
-(IFEval is the average of its four sub-metrics — prompt/instruction × strict/loose.)
-
-Numbers reproduce within run-to-run noise. Capability is measured in **thinking mode** (the deploy mode)
-with a large generation budget and the model's recommended sampling — see the report for why that matters
-for a reasoning model.
-
-> **int8-tp2 note:** its prefill depends on the PCIe bandwidth between the two GPUs you use. `reproduce.py`
-> defaults to `--devices 2,3` (a high-P2P pair on the reference box). On a 2-GPU box use `--devices 0,1`;
-> on other 4-GPU boxes, if prefill is slow, try another adjacent pair. `bf16-tp4` uses all 4, so it's not affected.
-
-## What's inside
-
-`reproduce.py` (host) → boots `qwen36-b70-ship` → `bench_inner.py` (in-container) drives `vllm bench serve`
-+ `lm-eval` (MMLU-Redux + IFEval, thinking mode via `run_lmeval_think.py`) + `humaneval_think.py` + `gsm8k_eval2.py`. Server flags are in `reproduce.py`
-(`CONFIGS` + `CFG`); the two configs differ only in TP size, quantization, gpu-util, and the DMA all-reduce.
+When serving across multiple GPUs, the Intel `xe` driver quietly mirrors the whole GPU working set into
+system RAM (~72 GB on 2 cards, ~121 GB on 4). [`ram-fix/`](ram-fix/) has a small, reversible host kernel
+patch that reclaims it (down to ~14–22 GB), with zero quality change. It's a **host-side, root, one-time**
+step — not part of `docker pull`. Skip it unless you're tight on RAM. See [`ram-fix/README.md`](ram-fix/README.md).
 
 ---
 
-## Publishing the image (maintainer note)
-
-The image lives on GitHub Container Registry, so recipients just `docker pull` — no tarball. To publish
-a new build, push it to GHCR (needs a token with `write:packages`):
-
-```bash
-docker tag qwen36-b70-ship:latest ghcr.io/ragingnoper/qwen36-b70-ship:latest
-echo "$GHCR_TOKEN" | docker login ghcr.io -u ragingnoper --password-stdin
-docker push ghcr.io/ragingnoper/qwen36-b70-ship:latest
-# then, one time, make the package public in the GitHub package settings
-```
-
-The model is **not** in the image (licensing + size) — recipients obtain Qwen3.6-35B-A3B separately.
+The model is **not** in the image (licensing + size) — get Qwen3.6-35B-A3B separately.

@@ -2,8 +2,10 @@
 """
 Reproduce the Qwen3.6-35B-A3B / Arc B70 benchmark + capability numbers.
 
-  python3 reproduce.py --config int8-tp2 --model /path/to/Qwen3.6-35B-A3B
-  python3 reproduce.py --config bf16-tp4 --model /path/to/Qwen3.6-35B-A3B --suite quick
+  python3 reproduce.py --config int8-tp4-concurrency --model /path/to/Qwen3.6-35B-A3B
+  python3 reproduce.py --config int8-tp2 --model /path/to/Qwen3.6-35B-A3B --suite quick
+
+Configs: int8-tp4-latency | int8-tp2 | int8-tp4-concurrency | bf16-tp4
 
 Needs only: Docker w/ Intel GPU access, the loaded `qwen36-b70-ship` image, and the model on disk.
 Stdlib only. Boots the server, waits, runs the in-container benchmarks, prints results, tears down.
@@ -11,24 +13,43 @@ Stdlib only. Boots the server, waits, runs the in-container benchmarks, prints r
 import argparse, subprocess, sys, time, urllib.request, urllib.error
 
 IMAGE = "ghcr.io/ragingnoper/qwen36-b70-ship:latest"; NAME = "qwen36-repro"; PORT = 8107
-CFG = ('{"mode":3,"cudagraph_mode":"FULL_DECODE_ONLY","splitting_ops":["vllm::unified_attention",'
-       '"vllm::unified_attention_with_output","vllm::gdn_attention_core","vllm::mamba_mixer2",'
-       '"vllm::mamba_mixer","vllm::linear_attention"],"pass_config":{"fuse_norm_quant":false,'
-       '"fuse_act_quant":false,"fuse_attn_quant":false,"enable_sp":false,"fuse_gemm_comms":false,'
-       '"fuse_allreduce_rms":false,"enable_qk_norm_rope_fusion":false,"fuse_rope_kvcache_cat_mla":false,'
-       '"fuse_act_padding":false,"fuse_mla_dual_rms_norm":false,"fuse_rope_kvcache":false},'
-       '"cudagraph_capture_sizes":[1,2,4,8,16,32]}')
+SPLIT = ('"vllm::unified_attention","vllm::unified_attention_with_output","vllm::gdn_attention_core",'
+         '"vllm::mamba_mixer2","vllm::mamba_mixer","vllm::linear_attention"')
+PASS = ('"pass_config":{"fuse_norm_quant":false,"fuse_act_quant":false,"fuse_attn_quant":false,'
+        '"enable_sp":false,"fuse_gemm_comms":false,"fuse_allreduce_rms":false,'
+        '"enable_qk_norm_rope_fusion":false,"fuse_rope_kvcache_cat_mla":false,"fuse_act_padding":false,'
+        '"fuse_mla_dual_rms_norm":false,"fuse_rope_kvcache":false}')
+def cfg_json(ladder):
+    return ('{"mode":3,"cudagraph_mode":"FULL_DECODE_ONLY","splitting_ops":[' + SPLIT + '],' + PASS +
+            ',"cudagraph_capture_sizes":[' + ladder + ']}')
+def mtp_arg(k):
+    return ["--speculative-config", '{"method":"mtp","num_speculative_tokens":%d}' % k]
 COMMON_ENV = ["VLLM_USE_V2_MODEL_RUNNER=1", "VLLM_SPEC_EAGER=1", "VLLM_XPU_ENABLE_XPU_GRAPH=1",
               "VLLM_XPU_CUSTOM_AR=1", "CCL_ENABLE_SYCL_KERNELS=1", "TORCHINDUCTOR_CACHE_DIR=/tmp/ind",
               "HF_HUB_OFFLINE=1", "HF_DATASETS_OFFLINE=1"] + \
              [f"DISABLE_ESIMD_{x}=1" for x in ("FUSED_INPUT", "QKV", "ATTN_GEMV", "DENSE", "MOE")]
+V4_AR = ["VLLM_XPU_CAR_DMA=1", "VLLM_XPU_CAR_SO=/work/ext/custom_ar.so.v4",
+         "VLLM_XPU_CAR_RSAG_MIN=65536", "VLLM_XPU_CAR_DMA_MIN=9999999999"]
 CONFIGS = {
-    "bf16-tp4": dict(devices="0,1,2,3", shm="64g", env=["VLLM_XPU_CAR_DMA=1"],
+    "int8-tp4-latency": dict(devices="0,1,2,3", shm="64g",
+                     env=["VLLM_INT8_GEMV_MAX_T=4", "VLLM_INT8_LMHEAD=1"] + V4_AR,
+                     ladder="1,2,3,4,5,8,16,32", mbt="4096", spec_k=3,
                      serve=["--tensor-parallel-size", "4", "--dtype", "bfloat16",
-                            "--gpu-memory-utilization", "0.80"]),
-    "int8-tp2": dict(devices="2,3", shm="32g", env=["VLLM_INT8_GEMV_MAX_T=1", "VLLM_INT8_LMHEAD=1"],
+                            "--quantization", "experts_int8", "--gpu-memory-utilization", "0.85"]),
+    "int8-tp2": dict(devices="2,3", shm="32g",
+                     env=["VLLM_INT8_GEMV_MAX_T=4", "VLLM_INT8_LMHEAD=1", "VLLM_XPU_CAR_DMA=1"],
+                     ladder="1,2,3,4,5,8,16,32", mbt="4096", spec_k=3,
                      serve=["--tensor-parallel-size", "2", "--dtype", "bfloat16",
                             "--quantization", "experts_int8", "--gpu-memory-utilization", "0.88"]),
+    "int8-tp4-concurrency": dict(devices="0,1,2,3", shm="64g",
+                     env=["VLLM_INT8_GEMV_MAX_T=1", "VLLM_INT8_LMHEAD=1"] + V4_AR,
+                     ladder="1,2,4,8,16,32,48,64,100", mbt="16384", spec_k=None,
+                     serve=["--tensor-parallel-size", "4", "--dtype", "bfloat16",
+                            "--quantization", "experts_int8", "--gpu-memory-utilization", "0.88"]),
+    "bf16-tp4": dict(devices="0,1,2,3", shm="64g", env=list(V4_AR),
+                     ladder="1,2,3,4,8,16,32", mbt="4096", spec_k=3,
+                     serve=["--tensor-parallel-size", "4", "--dtype", "bfloat16",
+                            "--gpu-memory-utilization", "0.80"]),
 }
 
 def sh(args, **k): return subprocess.run(args, **k)
@@ -44,23 +65,24 @@ def main():
 
     sh(["docker", "rm", "-f", NAME], capture_output=True)
     env = [f"ZE_AFFINITY_MASK={dev}"] + COMMON_ENV + c["env"]
+    serve = (["vllm", "serve", "/model", "--max-model-len", "40960", "--max-num-batched-tokens", c["mbt"]]
+             + (mtp_arg(c["spec_k"]) if c["spec_k"] else [])
+             + ["--compilation-config", cfg_json(c["ladder"]), "--port", str(PORT),
+                "--served-model-name", "qwen3.6-35b-a3b"]
+             + c["serve"])
     cmd = (["docker", "run", "-d", "--name", NAME, "--device", "/dev/dri", "--ipc", "host",
             "--shm-size", c["shm"], "-p", f"{PORT}:{PORT}"]
            + sum([["-e", e] for e in env], [])
-           + ["-v", f"{a.model}:/model", "--entrypoint", "", IMAGE,
-              "vllm", "serve", "/model", "--max-model-len", "40960", "--max-num-batched-tokens", "4096",
-              "--speculative-config", '{"method":"mtp","num_speculative_tokens":2}',
-              "--compilation-config", CFG, "--port", str(PORT), "--served-model-name", "qwen3.6-35b-a3b"]
-           + c["serve"])
+           + ["-v", f"{a.model}:/model", "--entrypoint", "", IMAGE] + serve)
     if a.config == "int8-tp2" and a.devices is None:
         print("[reproduce] NOTE: int8-tp2 uses 2 GPUs; prefill speed depends on the PCIe bandwidth\n"
-              "           between them. Default is GPUs 2,3 (a high-P2P pair on the reference box).\n"
-              "           2-GPU box? add `--devices 0,1`. Prefill slow? try another same-root pair.", flush=True)
+              "           between them, and on a 4-card box the pairs are NOT equal. Default is GPUs 2,3\n"
+              "           (a high-P2P pair on the reference box). 2-GPU box? add `--devices 0,1`.", flush=True)
     print(f"[reproduce] booting {a.config} on GPUs {dev} ...", flush=True)
     if sh(cmd, capture_output=True).returncode != 0:
         print("docker run failed"); sys.exit(1)
 
-    for i in range(200):
+    for i in range(240):
         try:
             if urllib.request.urlopen(f"http://localhost:{PORT}/health", timeout=5).status == 200:
                 print("[reproduce] server READY", flush=True); break

@@ -1,0 +1,10 @@
+qwen36-b70-ship.tar
+.git
+ram-fix
+*.md
+__pycache__
+*.pyc
+serve.py
+reproduce.py
+push_to_ghcr.sh
+.dockerignore

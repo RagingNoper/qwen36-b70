@@ -10,8 +10,12 @@
 # driver + /dev/dri (host userspace version need not match — see VERSIONS.md).
 FROM t212-vllm-graph-head2-mtp
 
-# --- custom all-reduce (DMA copy-engine) + TP communicator ---
+# --- custom all-reduce + TP communicator ---
+#   custom_ar.so     = DMA copy-engine reduce (default; used by int8-tp2, where 2-rank AR is already cheap)
+#   custom_ar.so.v4  = vec-reduce + reduce-scatter/all-gather (int8-tp4-latency, int8-tp4-concurrency, bf16-tp4)
+#   the communicator picks between them via the VLLM_XPU_CAR_SO env (default = the DMA .so)
 COPY patches/custom_ar.so               /work/ext/custom_ar.so
+COPY patches/custom_ar.so.v4            /work/ext/custom_ar.so.v4
 COPY patches/xpu_communicator.car.py    /opt/vllm-main/vllm/distributed/device_communicators/xpu_communicator.py
 # --- MTP + GDN cudagraph fix ---
 COPY patches/_xpu_ops.py                /opt/vllm-main/vllm/_xpu_ops.py
@@ -23,6 +27,8 @@ COPY patches/online_int8.py             /opt/vllm-main/vllm/model_executor/layer
 COPY patches/triton_moe_int8_native.py  /opt/vllm-main/vllm/model_executor/layers/quantization/online/_int8_gemv.py
 COPY patches/experts_int8.py            /opt/vllm-main/vllm/model_executor/layers/quantization/experts_int8.py
 COPY patches/_int8_linear.py            /opt/vllm-main/vllm/model_executor/layers/quantization/online/_int8_linear.py
+# --- autotuned int8 MoE block configs (per-shape; closes the prefill + concurrency gap, bit-identical output) ---
+COPY patches/moe-configs/               /opt/vllm-main/vllm/model_executor/layers/fused_moe/configs/
 
 # --- eval harness (runs in-container; Py3.12 so HumanEval code_eval works) ---
 RUN pip install --no-cache-dir "lm-eval[api]==0.4.12" transformers evaluate langdetect immutabledict nltk datasets \
@@ -34,4 +40,4 @@ COPY datasets/           /work/repro/datasets/
 COPY hfcache/            /root/.cache/huggingface/
 
 ENV HF_ALLOW_CODE_EVAL=1
-LABEL repro="qwen36-b70-ship" built="2026-07-13"
+LABEL repro="qwen36-b70-ship" built="2026-07-18"

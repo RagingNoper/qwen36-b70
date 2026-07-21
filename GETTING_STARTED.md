@@ -5,9 +5,13 @@ prints benchmark numbers. It assumes you can copy-paste into a terminal and read
 that you know anything about Intel GPU drivers, Docker, or vLLM. Take it one part at a time; each part
 ends with a check so you know it worked before moving on.
 
-**Two ways to run:**
-- `int8-tp2` — needs **2** Arc B70 cards. Recommended; it's the efficient one.
-- `bf16-tp4` — needs **4** Arc B70 cards.
+**Four ready-made setups — pick by your hardware and use case:**
+- `int8-tp4-latency` — **4** cards. Fastest replies when it's mostly one person at a time.
+- `int8-tp2` — **2** cards. Nearly as fast on half the hardware; recommended if you have 2 cards.
+- `int8-tp4-concurrency` — **4** cards. For serving many people at once.
+- `bf16-tp4` — **4** cards. Full-precision weights (the int8 setups match its quality).
+
+The examples below use `int8-tp2`; any config works the same way — just change the `--config` name.
 
 Rough time: 30–60 min of setup (mostly the GPU driver), then ~15 min for a quick test run.
 
@@ -161,7 +165,7 @@ at your model folder from Part 4:
 python3 reproduce.py --config int8-tp2 --model /home/you/models/Qwen3.6-35B-A3B --suite quick
 ```
 
-(Use `--config bf16-tp4` instead if you have 4 cards and want that one.)
+(Have 4 cards? Use `--config int8-tp4-latency` for the fastest single-user setup, or `--config int8-tp4-concurrency` to serve many users at once.)
 
 What happens: it starts the model server, waits for it to say `READY` (the first start compiles some
 kernels and can take 5–10 minutes — that's normal), runs the benchmarks, prints a results table, and
@@ -188,7 +192,7 @@ fast pair (prefill ~350 ms) and cards 0,1 are ~40% slower for the same work.
 - If prefill looks slow, try a different pair (`--devices 1,2`, `0,2`, etc.) — pick whichever gives the
   best "TTFT@1024" number. Adjacent cards on the same PCIe slot group are usually best.
 
-(`bf16-tp4` uses all 4 cards, so there's no pair to choose — this only applies to `int8-tp2`.)
+(The 4-card configs use all four cards, so there's no pair to choose — this only applies to `int8-tp2`.)
 
 ---
 
@@ -277,12 +281,13 @@ you've reproduced the result. 🎉
 - **"container died during boot"** — run `docker logs qwen36-repro` and look near the bottom.
   - *"visible devices (N)"* where N is less than expected → not all cards enumerated (see Part 1; try a
     full power-off/on).
-  - *out of memory / OOM* → another program is using the GPUs, or you tried `bf16-tp4` with fewer than 4
-    cards. Close other GPU programs; make sure the card count matches the config.
+  - *out of memory / OOM* → another program is using the GPUs, or you tried a 4-card config (`int8-tp4-latency`,
+    `int8-tp4-concurrency`, `bf16-tp4`) with fewer than 4 cards. Close other GPU programs; make sure the card
+    count matches the config.
 - **Boot takes a very long time the first run** — normal; it compiles GPU kernels. The second run is faster.
 - **"permission denied" talking to Docker or the GPU** — you skipped the log-out/in after Part 3's
   `usermod`. Log out and back in.
-- **Wrong number of GPUs** — `int8-tp2` needs 2, `bf16-tp4` needs 4. You can point at specific cards with
+- **Wrong number of GPUs** — `int8-tp2` needs 2; the three `-tp4` configs need 4. You can point at specific cards with
   `--devices 0,1` (first two) if your machine numbers them differently.
 
 Still stuck? The server log (`docker logs qwen36-repro`) almost always names the problem on one of its
