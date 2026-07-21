@@ -7,3 +7,6 @@ __pycache__/
 *.pyc
 validate_serve.*
 val_one.*
+val_rest.*
+reddit_post.md
+scripts/wallclock_decode.py
