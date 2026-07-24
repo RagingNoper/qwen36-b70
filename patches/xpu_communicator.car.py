@@ -79,7 +79,7 @@ class XpuCommunicator(DeviceCommunicatorBase):
         src = dist.get_global_rank(self.cpu_group, 0)
         obj = [f"vllm_car_{random.randint(0, 1 << 30)}"] if rk == 0 else [None]
         dist.broadcast_object_list(obj, src=src, group=self.cpu_group)
-        self._car_max = 16 << 20
+        self._car_max = int(__import__("os").environ.get("VLLM_XPU_CAR_MAX", 16 << 20))
         custom_ar.ar_init(rk, ws, obj[0], self._car_max)
         self._car = custom_ar
         logger.info("XPU CUSTOM all_reduce ENABLED (ws=%d rank=%d)", ws, rk)
@@ -91,8 +91,35 @@ class XpuCommunicator(DeviceCommunicatorBase):
         if getattr(self, "_car_null", False):
             return input_
         car = getattr(self, "_car", None)
+        _nbytes = input_.numel() * input_.element_size()
+        _route = __import__("os").environ.get("CAR_ROUTE", "size")
+        if _route in ("capture", "capture+small") and car is not None and self.world_size >= 2:
+            # capture: custom kernel while a graph records (graph-safe, baked
+            #   into the decode graph); everything eager -> oneCCL.
+            # capture+small: ALSO send small eager ARs (<= CAR_SMALL_MAX, e.g.
+            #   the eager MTP drafter's per-layer reduces) through the custom
+            #   kernel - oneCCL's small-message latency is what it was built to
+            #   beat. Large eager ARs (prefill) stay on oneCCL.
+            import torch as _tcap
+            try: _capturing = _tcap.xpu.is_current_stream_capturing()
+            except Exception: _capturing = False
+            _use_custom = _capturing
+            if not _use_custom and _route == "capture+small":
+                _small = int(__import__("os").environ.get("CAR_SMALL_MAX", 1 << 20))
+                _use_custom = _nbytes <= _small
+            if __import__("os").environ.get("CAR_SIZE_DEBUG"):
+                import sys as _s2; _s2.stderr.write(f"[CARSZ] bytes={_nbytes} ({_nbytes/1024:.0f}KB) -> {'CUSTOM' if _use_custom else 'oneCCL'}  capturing={_capturing} [route={_route}]\n"); _s2.stderr.flush()
+            if _use_custom:
+                return car.ar_all_reduce(input_.contiguous())
+            _out = input_.clone(); __import__("torch").distributed.all_reduce(_out, group=self.device_group); return _out
+        if __import__("os").environ.get("CAR_SIZE_DEBUG"):
+            import sys as _sca
+            try: _cap = __import__("torch").xpu.is_current_stream_capturing()
+            except Exception: _cap = "?"
+            _use = "CUSTOM" if (car is not None and self.world_size >= 2 and _nbytes <= self._car_max) else "oneCCL"
+            _sca.stderr.write(f"[CARSZ] bytes={_nbytes} ({_nbytes/1024:.0f}KB) -> {_use}  capturing={_cap}\n"); _sca.stderr.flush()
         if (car is not None and self.world_size >= 2
-                and input_.numel() * input_.element_size() <= self._car_max):
+                and _nbytes <= self._car_max):
             return car.ar_all_reduce(input_.contiguous())
         output = input_.clone()
         dist.all_reduce(output, group=self.device_group)

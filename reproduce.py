@@ -24,32 +24,36 @@ def cfg_json(ladder):
             ',"cudagraph_capture_sizes":[' + ladder + ']}')
 def mtp_arg(k):
     return ["--speculative-config", '{"method":"mtp","num_speculative_tokens":%d}' % k]
+# new stack (oneAPI 2026.1 / torch 2.13 / oneCCL 2022). CCL_WORKER_COUNT=1 is required (graph capture).
 COMMON_ENV = ["VLLM_USE_V2_MODEL_RUNNER=1", "VLLM_SPEC_EAGER=1", "VLLM_XPU_ENABLE_XPU_GRAPH=1",
-              "VLLM_XPU_CUSTOM_AR=1", "CCL_ENABLE_SYCL_KERNELS=1", "TORCHINDUCTOR_CACHE_DIR=/tmp/ind",
+              "VLLM_WORKER_MULTIPROC_METHOD=spawn", "CCL_ENABLE_SYCL_KERNELS=1", "CCL_ZE_IPC_EXCHANGE=sockets",
+              "CCL_WORKER_COUNT=1", "TORCHINDUCTOR_CACHE_DIR=/tmp/ind",
               "HF_HUB_OFFLINE=1", "HF_DATASETS_OFFLINE=1"] + \
              [f"DISABLE_ESIMD_{x}=1" for x in ("FUSED_INPUT", "QKV", "ATTN_GEMV", "DENSE", "MOE")]
-V4_AR = ["VLLM_XPU_CAR_DMA=1", "VLLM_XPU_CAR_SO=/work/ext/custom_ar.so.v4",
-         "VLLM_XPU_CAR_RSAG_MIN=65536", "VLLM_XPU_CAR_DMA_MIN=9999999999"]
+# custom all-reduce, capture+small route (the three MTP configs; the concurrency config uses pure oneCCL).
+CAR_ENV = ["VLLM_XPU_CUSTOM_AR=1", "CAR_ROUTE=capture+small", "VLLM_XPU_CAR_DMA=1",
+           "VLLM_XPU_CAR_SO=/work/ext/custom_ar_v4.so", "VLLM_XPU_CAR_RSAG_MIN=65536",
+           "VLLM_XPU_CAR_DMA_MIN=9999999999", "VLLM_XPU_CAR_MAX=16777216"]
 CONFIGS = {
     "int8-tp4-latency": dict(devices="0,1,2,3", shm="64g",
-                     env=["VLLM_INT8_GEMV_MAX_T=4", "VLLM_INT8_LMHEAD=1"] + V4_AR,
-                     ladder="1,2,3,4,5,8,16,32", mbt="4096", spec_k=3,
+                     env=["VLLM_INT8_GEMV_MAX_T=4", "VLLM_INT8_LMHEAD=1"] + CAR_ENV,
+                     ladder="4,8,16,32", mbt="4096", maxlen="262144", spec_k=3, kvd=None,
                      serve=["--tensor-parallel-size", "4", "--dtype", "bfloat16",
                             "--quantization", "experts_int8", "--gpu-memory-utilization", "0.85"]),
     "int8-tp2": dict(devices="2,3", shm="32g",
-                     env=["VLLM_INT8_GEMV_MAX_T=4", "VLLM_INT8_LMHEAD=1", "VLLM_XPU_CAR_DMA=1"],
-                     ladder="1,2,3,4,5,8,16,32", mbt="4096", spec_k=3,
+                     env=["VLLM_INT8_GEMV_MAX_T=4", "VLLM_INT8_LMHEAD=1"] + CAR_ENV,
+                     ladder="4,8,16,32", mbt="4096", maxlen="262144", spec_k=3, kvd=None,
                      serve=["--tensor-parallel-size", "2", "--dtype", "bfloat16",
                             "--quantization", "experts_int8", "--gpu-memory-utilization", "0.88"]),
     "int8-tp4-concurrency": dict(devices="0,1,2,3", shm="64g",
-                     env=["VLLM_INT8_GEMV_MAX_T=1", "VLLM_INT8_LMHEAD=1"] + V4_AR,
-                     ladder="1,2,4,8,16,32,48,64,100", mbt="16384", spec_k=None,
+                     env=["VLLM_INT8_GEMV_MAX_T=4", "VLLM_INT8_LMHEAD=1"],
+                     ladder="1,2,4,8,16,32,48,64", mbt="8192", maxlen="65536", spec_k=None, kvd="turboquant_k8v4",
                      serve=["--tensor-parallel-size", "4", "--dtype", "bfloat16",
                             "--quantization", "experts_int8", "--gpu-memory-utilization", "0.88"]),
-    "bf16-tp4": dict(devices="0,1,2,3", shm="64g", env=list(V4_AR),
-                     ladder="1,2,3,4,8,16,32", mbt="4096", spec_k=3,
+    "bf16-tp4": dict(devices="0,1,2,3", shm="64g", env=list(CAR_ENV),
+                     ladder="4,8,16,32", mbt="4096", maxlen="262144", spec_k=3, kvd=None,
                      serve=["--tensor-parallel-size", "4", "--dtype", "bfloat16",
-                            "--gpu-memory-utilization", "0.80"]),
+                            "--gpu-memory-utilization", "0.78"]),
 }
 
 def sh(args, **k): return subprocess.run(args, **k)
@@ -65,13 +69,16 @@ def main():
 
     sh(["docker", "rm", "-f", NAME], capture_output=True)
     env = [f"ZE_AFFINITY_MASK={dev}"] + COMMON_ENV + c["env"]
-    serve = (["vllm", "serve", "/model", "--max-model-len", "40960", "--max-num-batched-tokens", c["mbt"]]
+    serve = (["vllm", "serve", "/model", "--max-model-len", c["maxlen"], "--max-num-batched-tokens", c["mbt"],
+              "--enable-prefix-caching"]
+             + (["--kv-cache-dtype", c["kvd"]] if c["kvd"] else [])
              + (mtp_arg(c["spec_k"]) if c["spec_k"] else [])
              + ["--compilation-config", cfg_json(c["ladder"]), "--port", str(PORT),
                 "--served-model-name", "qwen3.6-35b-a3b"]
              + c["serve"])
-    cmd = (["docker", "run", "-d", "--name", NAME, "--device", "/dev/dri", "--ipc", "host",
-            "--shm-size", c["shm"], "-p", f"{PORT}:{PORT}"]
+    cmd = (["docker", "run", "-d", "--name", NAME, "--device", "/dev/dri",
+            "-v", "/dev/dri/by-path:/dev/dri/by-path",  # oneCCL 2022 enumerates GPUs via by-path
+            "--ipc", "host", "--shm-size", c["shm"], "-p", f"{PORT}:{PORT}"]
            + sum([["-e", e] for e in env], [])
            + ["-v", f"{a.model}:/model", "--entrypoint", "", IMAGE] + serve)
     if a.config == "int8-tp2" and a.devices is None:

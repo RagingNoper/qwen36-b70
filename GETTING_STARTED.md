@@ -27,7 +27,7 @@ Rough time: 30–60 min of setup (mostly the GPU driver), then ~15 min for a qui
 
 - A Linux PC/server with **2 or 4 Intel Arc Pro B70** GPUs installed and powered (each needs its PCIe
   power cables). Validated on **Ubuntu 26.04**, but any recent Linux with Intel GPU support works.
-- About **60 GB of free disk** for the container image, plus room for the model (~70 GB).
+- About **70 GB of free disk** for the container image, plus room for the model (~70 GB).
 - An internet connection for the driver install.
 - The **Qwen3.6-35B-A3B** model files (HuggingFace format) — see Part 4.
 - The scripts from the repo: `serve.py`, `reproduce.py`, and this folder. (The container image is
@@ -145,7 +145,7 @@ files. Remember this path — you'll pass it in Part 6.
 
 ## Part 5 — Get the container image
 
-The image is hosted on GitHub, so you just pull it (it's ~11 GB to download, ~48 GB once unpacked, so
+The image is hosted on GitHub, so you just pull it (it's ~15 GB to download, ~65 GB once unpacked, so
 give it a few minutes):
 
 ```bash
@@ -190,7 +190,7 @@ python3 reproduce.py --config int8-tp2 --model /home/you/models/Qwen3.6-35B-A3B
 `int8-tp2` uses **2** of your GPUs, and they talk to each other over PCIe during every prompt. **How
 fast that link is depends on which two cards you pick** — on a 4-card board, some pairs sit on the same
 part of the PCIe tree (fast) and some cross a slower hop. On the reference machine, cards **2,3** are the
-fast pair (prefill ~350 ms) and cards 0,1 are ~40% slower for the same work.
+fast pair (prefill ~180 ms) and cards 0,1 are ~40% slower for the same work.
 
 - The script defaults to `--devices 2,3` (the fast pair on the reference box). If you have **4 cards**,
   start there.
@@ -269,15 +269,15 @@ At the end you'll get a table like:
 
 ```
 -- prefill --
-  TTFT@1024               350.0 ms      <- time to first token for a 1024-token prompt
+  TTFT@1024               150.0 ms      <- time to first token for a 1024-token prompt
 -- static --
-  c1 out_tput             114.4 t/s     <- tokens/sec, one request at a time
-  c1 TPOT                  6.9  ms       <- time per output token (lower = faster typing)
+  c1 out_tput             180.0 t/s     <- tokens/sec, one request at a time
+  c1 TPOT                  5.1  ms       <- time per output token (lower = faster typing)
 -- capability (thinking mode) --
-  GSM8K                    97.0 %        <- accuracy on grade-school math
+  GSM8K                    98.0 %        <- accuracy on grade-school math
   MMLU-Redux 2.0           93.4 %        <- broad knowledge (corrected-label MMLU)
-  IFEval (avg of 4)        93.7 %        <- instruction-following
-  HumanEval pass@1         97.3 %        <- coding
+  IFEval (avg of 4)        92.7 %        <- instruction-following
+  HumanEval pass@1         97.0 %        <- coding
 ```
 
 These should match the published numbers within a few percent of run-to-run variation. If they do,

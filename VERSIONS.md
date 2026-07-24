@@ -4,23 +4,27 @@ Everything below is **baked into** `ghcr.io/ragingnoper/qwen36-b70-ship` at thes
 all of it from `docker pull`, with nothing to install and no version drift.
 
 Important: the image is built **FROM a prebuilt vLLM-XPU base image** (the author's custom build). The
-`Dockerfile` in this repo only adds the kernel patches + the eval harness on top, so the versions below
-come from that base image, **not** from the Dockerfile. The image is the source of truth; this file just
-documents what's in it.
+`Dockerfile` in this repo only adds the eval harness on top, so the versions below come from that base
+image, **not** from the Dockerfile. The image is the source of truth; this file just documents what's in it.
 
 | Component | Version |
 |---|---|
 | Container OS | Ubuntu 24.04.3 LTS |
 | Python | 3.12.3 |
-| PyTorch (XPU) | 2.12.0+xpu |
-| vLLM | 0.1.dev1+gdec860fb1 (main-branch build) |
-| Triton (XPU) | 3.7.1 |
-| Intel oneAPI DPC++/C++ compiler | 2025.3.2 |
-| Intel oneCCL | 2021.17.2 |
+| PyTorch (XPU) | 2.13.0+xpu |
+| vLLM | main-branch build (0.1.dev) |
+| Triton (XPU) | 3.7.2 |
+| Intel oneAPI DPC++/C++ compiler | 2026.1.0 |
+| Intel oneCCL | 2022 (pip `oneccl`, torch-native `xccl` backend) |
 | Intel compute runtime (Level-Zero GPU, in-container) | 26.09.37435.12 |
 | Level-Zero loader (in-container) | 1.28.0 |
 | lm-eval-harness (+ transformers, evaluate, datasets) | 0.4.12 |
-| Custom bits | DMA copy-engine all-reduce, MTP drafter + GDN cudagraph fix, experts_int8 kernels (see `patches/`) |
+| Custom bits | custom all-reduce (capture+small route: vec-reduce + reduce-scatter/all-gather), MTP drafter + GDN / mamba V2-align cudagraph fix, `experts_int8` kernels + batch-1 MoE GEMV + autotuned MoE block configs, turboquant (int8) KV-cache dtype, prefix-cache (mamba-align) support (see `patches/`) |
+
+> **Note on the stack move.** This is the **oneAPI-2026** build. The previous release (oneAPI 2025.3 /
+> torch 2.12 / oneCCL 2021) is preserved at git tag `v1.0-oneapi2025` and image tag
+> `ghcr.io/ragingnoper/qwen36-b70-ship:oneapi2025`. The new runtime is leaner (more of each card's VRAM
+> goes to KV cache) and prefills ~2x faster; see the writeup for the full before/after.
 
 ## GPU driver — host vs. container (read this)
 
@@ -39,6 +43,7 @@ hard host requirement is a **Battlemage-capable kernel driver** plus `/dev/dri` 
 ## Reproducing the base image
 
 The Dockerfile is intentionally a thin layer; it is **not** a from-scratch recipe, because the base image
-(`t212-vllm-graph-head2-mtp`) is a large custom vLLM-XPU build (patched kernels, a custom all-reduce, a
-paged-decode patch, triton-xpu, etc.). The intended distribution is the prebuilt GHCR image above, not a
-rebuild-from-source — the pinned versions in the table are how you verify you have the right one.
+(`t212-vllm-oneapi2026:prod2`) is a large custom vLLM-XPU build (patched kernels, a custom all-reduce, a
+paged-decode patch, triton-xpu, oneCCL 2022, etc.) on oneAPI 2026.1. The intended distribution is the
+prebuilt GHCR image above, not a rebuild-from-source — the pinned versions in the table are how you verify
+you have the right one.

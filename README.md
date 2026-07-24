@@ -9,13 +9,15 @@ walkthrough (install Docker → get the model → serve → connect a chat app).
 
 | Your situation | Use this | What you get |
 |---|---|---|
-| I have **4 cards** and mostly **one person** chatting at a time | **`int8-tp4-latency`** | The fastest replies (~206 tokens/sec). |
-| I only have **2 cards** (or want to keep two free) | **`int8-tp2`** | Almost as fast (~174 tok/s), and the quickest to start answering long prompts. |
-| I have **4 cards** and want to serve **lots of people at once** | **`int8-tp4-concurrency`** | ~965 tok/s across 64 simultaneous chats, and room for ~150 conversations at once. |
+| I have **4 cards** and mostly **one person** chatting at a time | **`int8-tp4-latency`** | The fastest replies (~201 tokens/sec), at up to **256K** context. |
+| I only have **2 cards** (or want to keep two free) | **`int8-tp2`** | Nearly as fast (~196 tok/s) on just two cards, up to 256K context. |
+| I have **4 cards** and want to serve **lots of people at once** | **`int8-tp4-concurrency`** | ~990 tok/s across 64 simultaneous chats, and a **4.14M-token** KV cache for many long conversations. |
 | I specifically want **full-precision** weights | **`bf16-tp4`** | Full bf16. (The int8 setups match it on quality and beat it on speed, so most people don't need this.) |
 
 All four give **identical answer quality** — the int8 versions are quantized in a way that costs no
-measurable quality on this model. Pick based on your hardware and how many people will use it.
+measurable quality on this model. All four also keep a **prefix cache**, so long multi-turn sessions only
+re-read the new tokens each turn (prior turns stay cached) — a 256K conversation stays responsive. Pick
+based on your hardware and how many people will use it.
 
 ## What you need
 
@@ -29,7 +31,7 @@ measurable quality on this model. Pick based on your hardware and how many peopl
 ## 1. Get the image
 
 ```bash
-docker pull ghcr.io/ragingnoper/qwen36-b70-ship:latest   # ~11 GB download
+docker pull ghcr.io/ragingnoper/qwen36-b70-ship:latest   # ~15 GB download
 ```
 
 ## 2. Start the model
@@ -56,11 +58,17 @@ API key left blank. **[GETTING_STARTED.md](GETTING_STARTED.md)** has a copy-past
 
 | | int8-tp4-latency | int8-tp2 | int8-tp4-concurrency | bf16-tp4 |
 |---|---|---|---|---|
-| Single reply speed (decode) | **206 tok/s** | 174 tok/s | 142 tok/s | 175 tok/s |
-| Time to first token (1024-tok prompt) | 206 ms | 173 ms | 195 ms | 205 ms |
-| Prompt-reading speed (1024 tok) | 5,147 tok/s | **6,268 tok/s** | 5,148 tok/s | 5,139 tok/s |
-| Throughput at 64 users | — | — | **965 tok/s** | — |
-| Simultaneous conversations (KV cache) | 816k tok | 267k tok | **1.37M tok** | 380k tok |
+| Single reply speed (decode) | **201 tok/s** | 196 tok/s | 137 tok/s | 197 tok/s |
+| Time to first token (1024-tok prompt) | 129 ms | 144 ms | 117 ms | 119 ms |
+| Prompt-reading speed (cold prefill) | 11,000 tok/s | 8,800 tok/s | 11,600 tok/s | **13,000 tok/s** |
+| Throughput at 64 users | — | — | **990 tok/s** | — |
+| Simultaneous conversations (KV cache) | 1.47M tok | 614k tok | **4.14M tok** | 612k tok |
+| Max context per request | 256K | 256K | 64K | 256K |
+
+Decode is measured at each config's full context (256K / 64K). Prefill is the cold (cache-miss) rate;
+with the prefix cache on, repeat turns of a conversation skip nearly all of it. **bf16 has the fastest
+prefill** (its mature vendor GEMM leads on the compute-bound prefill), while int8 wins where it counts —
+decode, quality-per-byte, and KV capacity.
 
 **Quality is the same across all four** (thinking mode, recommended sampling): MMLU-Redux 2.0 **93.4%**,
 IFEval **92.7%**, HumanEval **97.0%**, GSM8K **98%** — right where a healthy Qwen3.6-35B-A3B should be.
@@ -87,5 +95,8 @@ patch that reclaims it (down to ~14–22 GB), with zero quality change. It's a *
 step — not part of `docker pull`. Skip it unless you're tight on RAM. See [`ram-fix/README.md`](ram-fix/README.md).
 
 ---
+
+This is the **oneAPI-2026** build (torch 2.13). The previous oneAPI-2025 release is preserved at git tag
+`v1.0-oneapi2025` and image tag `ghcr.io/ragingnoper/qwen36-b70-ship:oneapi2025`.
 
 The model is **not** in the image (licensing + size) — get Qwen3.6-35B-A3B separately.

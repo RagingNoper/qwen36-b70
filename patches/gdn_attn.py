@@ -206,6 +206,17 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 spec_sequence_masks = spec_sequence_masks_cpu.to(
                     query_start_loc.device, non_blocking=True
                 )
+                # graph-safe row indices: boolean-mask advanced-index of a DEVICE
+                # tensor with a CPU mask forces a BLOCKING host->device index copy
+                # (event wait) -> illegal while the warmup captures the decode step.
+                # Precompute row ids on the host (mask is CPU -> no device sync) and
+                # copy async; downstream sites use index_select (pure gather, no wait).
+                _rs = spec_sequence_masks_cpu.nonzero(as_tuple=True)[0].to(
+                    query_start_loc.device, non_blocking=True
+                )
+                _rns = (~spec_sequence_masks_cpu).nonzero(as_tuple=True)[0].to(
+                    query_start_loc.device, non_blocking=True
+                )
 
         if spec_sequence_masks is None:
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
@@ -263,9 +274,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     0, dtype=torch.int32, device=query_start_loc.device
                 )
                 # Filter by spec_sequence_masks to exclude padded sequences
+                # graph-safe gather: boolean-mask advanced-index of a device tensor
+                # moves the CPU mask's nonzero indices to device with a BLOCKING event
+                # wait -> illegal while the warmup captures this decode. Compute rows on
+                # the host (no device sync), copy async, integer index_select (no wait).
                 spec_state_indices_tensor = block_table_tensor[
-                    spec_sequence_masks_cpu, : self.num_spec + 1
-                ]
+                    :, : self.num_spec + 1
+                ].index_select(0, _rs)
                 non_spec_state_indices_tensor = None
                 # Padded sequences are always at the back, so the first
                 # num_spec_decodes + 1 entries of query_start_loc already
@@ -285,11 +300,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 spec_token_indx = index[num_non_spec_tokens:]
 
                 spec_state_indices_tensor = block_table_tensor[
-                    spec_sequence_masks_cpu, : self.num_spec + 1
-                ]
-                non_spec_state_indices_tensor = block_table_tensor[
-                    ~spec_sequence_masks_cpu, 0
-                ]
+                    :, : self.num_spec + 1
+                ].index_select(0, _rs)
+                non_spec_state_indices_tensor = block_table_tensor[:, 0].index_select(
+                    0, _rns
+                )
 
                 spec_query_start_loc = torch.zeros(
                     num_spec_decodes + 1,
@@ -297,7 +312,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     device=query_start_loc.device,
                 )
                 torch.cumsum(
-                    query_lens[spec_sequence_masks_cpu],
+                    query_lens.index_select(0, _rs),
                     dim=0,
                     out=spec_query_start_loc[1:],
                 )
@@ -307,7 +322,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     device=query_start_loc.device,
                 )
                 torch.cumsum(
-                    query_lens[~spec_sequence_masks_cpu],
+                    query_lens.index_select(0, _rns),
                     dim=0,
                     out=non_spec_query_start_loc[1:],
                 )
@@ -322,7 +337,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 )
 
             assert num_accepted_tokens is not None
-            num_accepted_tokens = num_accepted_tokens[spec_sequence_masks_cpu]
+            num_accepted_tokens = num_accepted_tokens.index_select(0, _rs)
 
         chunk_indices: torch.Tensor | None = None
         chunk_offsets: torch.Tensor | None = None
@@ -386,7 +401,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         if num_prefills > 0:
             has_initial_state = context_lens_tensor > 0
             if spec_sequence_masks_cpu is not None:
-                has_initial_state = has_initial_state[~spec_sequence_masks_cpu]
+                has_initial_state = has_initial_state.index_select(0, _rns)
                 assert non_spec_query_start_loc_cpu is not None
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
                 compute_causal_conv1d_metadata(

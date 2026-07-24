@@ -120,6 +120,14 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         self,
         attn_states: dict[BatchExecutionDescriptor, AttentionStatePair],
     ) -> None:
+        import os as _osspec
+        if _osspec.environ.get("VLLM_SPEC_EAGER") and not _osspec.environ.get("FORCE_DRAFTER_CAPTURE"):
+            # VLLM_SPEC_EAGER: drafter runs eager at inference, so DO NOT capture it.
+            # On torch 2.13 the mode-NONE manager.capture() still opens a SYCL command
+            # graph and leaks a queue in recording state -> the post-capture warmup then
+            # hits "wait cannot be called for a queue which is recording". Skip entirely.
+            logger.info("Speculator eager (VLLM_SPEC_EAGER=1): skipping drafter capture.")
+            return
         logger.info("Capturing model for speculator...")
         # Reset indices to zeros to prevent stale values from prior
         # dummy runs to cause out-of-bounds indexing during capture.
@@ -197,6 +205,17 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
     ) -> torch.Tensor:
+        import os as _osp, sys as _sysp
+        def _psync(tag):
+            if not _osp.environ.get("WU_STEP_DEBUG"):
+                return
+            try:
+                torch.xpu.synchronize()
+                _sysp.stderr.write(f"[PROPOSE] {tag}: sync OK\n"); _sysp.stderr.flush()
+            except Exception as _e:
+                _sysp.stderr.write(f"[PROPOSE] {tag}: sync FAILED -> {_e}\n"); _sysp.stderr.flush()
+        _psync("propose ENTRY (after target fwd)")
+        _spec_eager = bool(_osp.environ.get("VLLM_SPEC_EAGER"))
         num_tokens = input_batch.num_tokens_after_padding
         num_reqs = input_batch.num_reqs
         max_query_len = input_batch.num_scheduled_tokens.max()
@@ -256,7 +275,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             uniform_token_count,
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
-            need_eager=is_profile,
+            need_eager=(is_profile or _spec_eager),
         )
 
         if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
@@ -290,6 +309,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 mm_inputs=mm_inputs,
             )
 
+        _psync("after _prefill / run_fullgraph")
         if self.num_speculative_steps == 1:
             # Early exit.
             return self.draft_tokens[:num_reqs, :1]
@@ -314,9 +334,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             uniform_token_count=1,
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
-            need_eager=is_profile,
+            need_eager=(is_profile or _spec_eager),
         )
 
+        _psync("after decode dispatch (before multi_step)")
         # Generate the remaining num_speculative_steps - 1 draft tokens.
         self._multi_step_decode(
             num_reqs,
@@ -324,6 +345,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             decode_batch_desc,
             num_tokens_across_dp,
         )
+        _psync("after _multi_step_decode (propose EXIT)")
 
         return self.draft_tokens[:num_reqs]
 
